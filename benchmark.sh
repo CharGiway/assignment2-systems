@@ -1,4 +1,4 @@
-#!/usr/bin/env bash # 使用 env 查找 bash 解释器，提升可移植性
+#!/bin/bash # 使用 env 查找 bash 解释器，提升可移植性
 set -euo pipefail # 严格模式：出错退出、未定义变量报错、管道错误传播
 
 SIZE="small"       # 预设模型尺寸：small/medium/large/xl/2.7B；留空则走自定义超参

@@ -5,6 +5,17 @@ import einx
 from einops import rearrange
 from cs336_basics.nn.sdpa import scaled_dot_product_attention
 from cs336_basics.nn.rope import RotaryPositionalEmbedding
+from contextlib import contextmanager
+
+
+try:
+    import torch.cuda.nvtx as _nvtx
+    def nvtx_range(name: str):
+        return _nvtx.range(name)
+except Exception:
+    @contextmanager
+    def nvtx_range(name: str):
+        yield
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -62,22 +73,28 @@ class MultiHeadSelfAttention(nn.Module):
         """
         device = x.device
         seq_len = x.shape[-2]
-        q = torch.einsum("... t d, o d -> ... t o", x, self.q_proj)
-        k = torch.einsum("... t d, o d -> ... t o", x, self.k_proj)
-        v = torch.einsum("... t d, o d -> ... t o", x, self.v_proj)
-        q = rearrange(q, "... t (h d) -> ... h t d", h=self.num_heads)
-        k = rearrange(k, "... t (h d) -> ... h t d", h=self.num_heads)
-        v = rearrange(v, "... t (h d) -> ... h t d", h=self.num_heads)
+        with nvtx_range("qkv projections"):
+            q = torch.einsum("... t d, o d -> ... t o", x, self.q_proj)
+            k = torch.einsum("... t d, o d -> ... t o", x, self.k_proj)
+            v = torch.einsum("... t d, o d -> ... t o", x, self.v_proj)
+        with nvtx_range("reshape heads"):
+            q = rearrange(q, "... t (h d) -> ... h t d", h=self.num_heads)
+            k = rearrange(k, "... t (h d) -> ... h t d", h=self.num_heads)
+            v = rearrange(v, "... t (h d) -> ... h t d", h=self.num_heads)
         if self.rope is not None:
-            if token_positions is None:
-                b = x.shape[0]
-                pos = torch.arange(seq_len, device=device, dtype=torch.long)
-                ones = torch.ones((b,), device=device, dtype=torch.long)
-                token_positions = einx.multiply("b, t -> b t", ones, pos)
-            q = self.rope(q, token_positions)
-            k = self.rope(k, token_positions)
+            with nvtx_range("rope"):
+                if token_positions is None:
+                    b = x.shape[0]
+                    pos = torch.arange(seq_len, device=device, dtype=torch.long)
+                    ones = torch.ones((b,), device=device, dtype=torch.long)
+                    token_positions = einx.multiply("b, t -> b t", ones, pos)
+                q = self.rope(q, token_positions)
+                k = self.rope(k, token_positions)
         causal = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=device))
-        out_heads = scaled_dot_product_attention(q, k, v, mask=causal)
-        out = rearrange(out_heads, "... h t d -> ... t (h d)")
-        y = torch.einsum("... t d, o d -> ... t o", out, self.o_proj)
+        with nvtx_range("sdpa"):
+            out_heads = scaled_dot_product_attention(q, k, v, mask=causal)
+        with nvtx_range("merge heads"):
+            out = rearrange(out_heads, "... h t d -> ... t (h d)")
+        with nvtx_range("output projection"):
+            y = torch.einsum("... t d, o d -> ... t o", out, self.o_proj)
         return y

@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from cs336_basics.nn.transformer_lm import TransformerLM
 from cs336_basics.nn.cross_entropy import cross_entropy
+from contextlib import contextmanager
 
 
 # 预设模型规格表（与作业要求一致，便于快速切换规模）
@@ -44,21 +45,36 @@ def make_batch(batch_size, context_length, vocab_size, device, dtype):
     return x, y
 
 
-def time_steps(model, x, y, steps, mode, device):
+try:
+    import torch.cuda.nvtx as _nvtx
+    def nvtx_range(name: str):
+        return _nvtx.range(name)
+except Exception:
+    @contextmanager
+    def nvtx_range(name: str):
+        yield
+
+
+def time_steps(model, x, y, steps, mode, device, tag: str = "measure"):
     # 执行 steps 次计算并统计每步耗时：
     # - mode == "fwd"：仅前向（评估/推理常用）
     # - 否则：前向 + 反向（训练常用）
     times = []
-    for _ in range(steps):
+    for i in range(steps):
+        step_name = f"{tag}/step_{i+1}"
         start = timeit.default_timer()
-        if mode == "fwd":
-            with torch.no_grad():
-                _ = model(x)
-        else:
-            logits = model(x)
-            loss = cross_entropy(logits.view(-1, logits.shape[-1]), y.view(-1))
-            model.zero_grad(set_to_none=True)
-            loss.backward()
+        with nvtx_range(step_name):
+            if mode == "fwd":
+                with nvtx_range("forward"):
+                    with torch.no_grad():
+                        _ = model(x)
+            else:
+                with nvtx_range("forward"):
+                    logits = model(x)
+                    loss = cross_entropy(logits.view(-1, logits.shape[-1]), y.view(-1))
+                with nvtx_range("backward"):
+                    model.zero_grad(set_to_none=True)
+                    loss.backward()
         if device.type == "cuda":
             # CUDA 上需同步以消除异步调度对计时的影响
             torch.cuda.synchronize()
@@ -135,8 +151,8 @@ def main():
     x, y = make_batch(args.batch_size, args.context_length, args.vocab_size, device, dtype)
 
     # 预热若干步，随后计时 steps 次
-    _ = time_steps(model, x, y, args.warmup, args.mode, device)
-    times = time_steps(model, x, y, args.steps, args.mode, device)
+    _ = time_steps(model, x, y, args.warmup, args.mode, device, tag="warmup")
+    times = time_steps(model, x, y, args.steps, args.mode, device, tag="measure")
     mean = float(times.mean())
     std = float(times.std(ddof=1)) if times.size > 1 else 0.0
 
