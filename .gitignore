@@ -165,3 +165,5 @@ cython_debug/
 
 artifacts/*
 !artifacts/bench_results.csv
+
+writeup.pdf
